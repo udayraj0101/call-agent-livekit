@@ -1,0 +1,42 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.eggs/
+*.egg-info/
+
+# uv lockfile (commit if you want reproducible installs; leave out for now)
+# uv.lock
+
+# Prerendered greeting cache (regenerated on first run)
+.cache/
+*.pcm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+pm2.log
+
+# PM2 runtime
+.pm2/

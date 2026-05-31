@@ -16,7 +16,9 @@ module.exports = {
       name: "call-agent",
       cwd: __dirname,
       script: "./.venv/bin/python",
-      args: "agent.py start",
+      // --port: the agent's internal HTTP health/metrics server. Default 8081
+      // collides with some VPS services; override to 8082 (or any free port).
+      args: "agent.py start --port 8082",
       interpreter: "none",
       instances: 1,
       autorestart: true,

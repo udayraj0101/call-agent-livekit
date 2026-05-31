@@ -16,9 +16,7 @@ module.exports = {
       name: "call-agent",
       cwd: __dirname,
       script: "./.venv/bin/python",
-      // --port: the agent's internal HTTP health/metrics server. Default 8081
-      // collides with some VPS services; override to 8082 (or any free port).
-      args: "agent.py start --port 8082",
+      args: "agent.py start",
       interpreter: "none",
       instances: 1,
       autorestart: true,
@@ -26,6 +24,9 @@ module.exports = {
       max_memory_restart: "1G",
       env: {
         PYTHONUNBUFFERED: "1",
+        // Override default 8081 — taken by the call-agent-saas worker on this VPS.
+        // agent.py reads this and passes it to WorkerOptions(port=...).
+        AGENT_HTTP_PORT: "8082",
       },
       error_file: "./logs/error.log",
       out_file: "./logs/out.log",

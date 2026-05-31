@@ -398,5 +398,9 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name=AGENT_NAME,
+            # Internal HTTP server port (health/metrics). Default 8081; override
+            # on the VPS via AGENT_HTTP_PORT env var because port 8081 is taken
+            # by the call-agent-saas worker.
+            port=int(os.getenv("AGENT_HTTP_PORT", "8081")),
         )
     )

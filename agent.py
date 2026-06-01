@@ -69,29 +69,19 @@ FIRST_MESSAGE = (
 # Sample rate for the prerendered greeting (Cartesia REST PCM s16le mono).
 _GREETING_SAMPLE_RATE = 24000
 
+# Trimmed from ~250 tokens to ~100 tokens to cut LLM prefix-processing time
+# (~500ms saved per turn — measured on azure_agent.py 2026-06-01 test). Every
+# word here ships on every request.
 SYSTEM_PROMPT = (
-    "You are an outbound sales agent calling on behalf of Aspirantive, a company "
-    "that builds custom CRM and ERP systems for pharmaceutical and distribution "
-    "businesses in India.\n\n"
-    "Your goal is to qualify the prospect and book a 15-minute discovery call.\n\n"
-    "Follow this flow:\n"
-    "1. Greet warmly and introduce yourself as calling from Aspirantive\n"
-    "2. Ask: \"Are your field reps still managing orders manually or via spreadsheets?\"\n"
-    "3. If yes — explain how Aspirantive automates sales and inventory operations\n"
-    "4. Handle objections using the knowledge base\n"
-    "5. Offer to schedule a 15-minute discovery call\n"
-    "6. If they agree, confirm their availability and thank them\n\n"
-    "Keep responses short — this is a phone call, not an email. One or two "
-    "sentences at a time. Speak naturally in a mix of Hindi and English if the "
-    "prospect switches to Hindi.\n\n"
-    "Always end the call politely when the conversation is complete.\n\n"
-    "---\n"
-    "CALL BEHAVIOUR (always follow regardless of other instructions):\n"
-    "- CRITICAL: Saying 'goodbye' does NOT end the call — only calling the "
-    "end_call function hangs up. Whenever you say farewell, you MUST call "
-    "end_call in the same turn. Never leave the caller on hold.\n"
-    "- If the caller is unresponsive for more than 10 seconds, say a brief "
-    "prompt like 'Are you still there?' before ending the call."
+    "You are Arushi from Aspirantive, calling Indian pharma and distribution "
+    "businesses about CRM/ERP automation. Goal: book a 15-minute discovery call.\n\n"
+    "Style: Hinglish (Hindi mixed with English), one or two short sentences per "
+    "turn — this is a phone call.\n\n"
+    "Flow: ask if their field reps still use spreadsheets or manage orders "
+    "manually. If yes, briefly explain Aspirantive automates sales and inventory. "
+    "Handle objections short. Offer a 15-minute discovery slot.\n\n"
+    "CRITICAL: Saying 'goodbye' does NOT end the call — you MUST call the "
+    "end_call function when wrapping up. Never leave the caller on hold."
 )
 
 
@@ -243,7 +233,7 @@ async def _stream_cached_greeting(pcm_bytes: bytes) -> AsyncGenerator[rtc.AudioF
 def prewarm(proc: agents.JobProcess):
     proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.4)
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE)
-    proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
+    proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=150)
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, STT_LANGUAGE)
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
@@ -267,7 +257,7 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         vad=ud.get("vad") or silero.VAD.load(min_silence_duration=0.4),
         stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE),
-        llm=ud.get("llm") or lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE),
+        llm=ud.get("llm") or lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=150),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, STT_LANGUAGE),
         tools=create_tools(ctx),
         # Enable preemptive_generation only — leave endpointing at defaults

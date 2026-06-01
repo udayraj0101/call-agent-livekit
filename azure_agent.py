@@ -77,29 +77,18 @@ FIRST_MESSAGE = (
 
 _GREETING_SAMPLE_RATE = 24000
 
+# Trimmed from ~250 tokens to ~100 tokens to cut LLM prefix-processing time
+# (~150-300ms saved per turn). Every word here ships on every request.
 SYSTEM_PROMPT = (
-    "You are an outbound sales agent calling on behalf of Aspirantive, a company "
-    "that builds custom CRM and ERP systems for pharmaceutical and distribution "
-    "businesses in India.\n\n"
-    "Your goal is to qualify the prospect and book a 15-minute discovery call.\n\n"
-    "Follow this flow:\n"
-    "1. Greet warmly and introduce yourself as calling from Aspirantive\n"
-    "2. Ask: \"Are your field reps still managing orders manually or via spreadsheets?\"\n"
-    "3. If yes — explain how Aspirantive automates sales and inventory operations\n"
-    "4. Handle objections using the knowledge base\n"
-    "5. Offer to schedule a 15-minute discovery call\n"
-    "6. If they agree, confirm their availability and thank them\n\n"
-    "Keep responses short — this is a phone call, not an email. One or two "
-    "sentences at a time. Speak naturally in a mix of Hindi and English if the "
-    "prospect switches to Hindi.\n\n"
-    "Always end the call politely when the conversation is complete.\n\n"
-    "---\n"
-    "CALL BEHAVIOUR (always follow regardless of other instructions):\n"
-    "- CRITICAL: Saying 'goodbye' does NOT end the call — only calling the "
-    "end_call function hangs up. Whenever you say farewell, you MUST call "
-    "end_call in the same turn. Never leave the caller on hold.\n"
-    "- If the caller is unresponsive for more than 10 seconds, say a brief "
-    "prompt like 'Are you still there?' before ending the call."
+    "You are Arushi from Aspirantive, calling Indian pharma and distribution "
+    "businesses about CRM/ERP automation. Goal: book a 15-minute discovery call.\n\n"
+    "Style: Hinglish (Hindi mixed with English), one or two short sentences per "
+    "turn — this is a phone call.\n\n"
+    "Flow: ask if their field reps still use spreadsheets or manage orders "
+    "manually. If yes, briefly explain Aspirantive automates sales and inventory. "
+    "Handle objections short. Offer a 15-minute discovery slot.\n\n"
+    "CRITICAL: Saying 'goodbye' does NOT end the call — you MUST call the "
+    "end_call function when wrapping up. Never leave the caller on hold."
 )
 
 
@@ -114,12 +103,15 @@ class SampleAgent(Agent):
 # ---------------------------------------------------------------------------
 
 def _build_azure_llm():
+    # max_completion_tokens caps reply length — TTS starts streaming sooner and
+    # prevents the model from rambling past ~2 phone sentences.
     return lk_openai.LLM.with_azure(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_API_KEY,
         azure_deployment=AZURE_OPENAI_DEPLOYMENT,
         api_version=AZURE_OPENAI_API_VERSION,
         temperature=LLM_TEMPERATURE,
+        max_completion_tokens=150,
     )
 
 
@@ -295,6 +287,12 @@ async def entrypoint(ctx: agents.JobContext):
         llm=ud.get("llm") or _build_azure_llm(),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, STT_LANGUAGE),
         tools=create_tools(ctx),
+        # Stays at LiveKit default 0.5s. We tried 0.3s for a ~200ms turn win;
+        # it broke Hindi conversations because Hindi has natural mid-sentence
+        # pauses ("...क्या कर सकते <pause> हो?") that the shorter window
+        # mistook for end-of-turn — STT finalized partial transcripts and the
+        # agent restarted LLM mid-thought. Don't lower without a semantic turn
+        # detector (LiveKit ships one — `livekit-plugins-turn-detector`).
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
         },

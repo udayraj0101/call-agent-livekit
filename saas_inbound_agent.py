@@ -310,11 +310,11 @@ async def entrypoint(ctx: agents.JobContext):
     direction = "outbound" if phone_number else "inbound"
 
     logger.info(
-        f"{direction.title()} call (SaaS-LiveKit + Azure India) — "
+        f"{direction.title()} call (SaaS-LiveKit + OpenAI gpt-4o-mini) — "
         f"room: {ctx.room.name}"
     )
     logger.info(
-        f"Config — llm=azure/{AZURE_OPENAI_DEPLOYMENT} "
+        f"Config — llm=openai/gpt-4o-mini "
         f"tts={TTS_PROVIDER}/{TTS_MODEL}/{TTS_VOICE} stt={STT_MODEL}/{STT_LANGUAGE} "
         f"direction={direction}"
     )

@@ -43,7 +43,10 @@ AGENT_NAME                = "inbound-caller"
 LLM_MODEL                 = "gpt-4o-mini"
 LLM_TEMPERATURE           = 0.7
 STT_MODEL                 = "nova-3"          # upgraded from nova-2 — better Hinglish accuracy
-STT_LANGUAGE              = "hi"              # Hindi
+STT_LANGUAGE              = "multi"            # Deepgram code-switching model
+                                               # (better than "hi" for Hinglish)
+TTS_LANGUAGE              = "hi"               # Cartesia / build_tts() need a real
+                                               # language code, not "multi"
 MAX_CALL_DURATION_SECONDS = 600               # 10 minutes per CRM config
 
 # TTS — locked to Cartesia for low TTFB and the Arushi Hinglish voice.
@@ -73,15 +76,10 @@ _GREETING_SAMPLE_RATE = 24000
 # (~500ms saved per turn — measured on azure_agent.py 2026-06-01 test). Every
 # word here ships on every request.
 SYSTEM_PROMPT = (
-    "You are Arushi from Aspirantive, calling Indian pharma and distribution "
-    "businesses about CRM/ERP automation. Goal: book a 15-minute discovery call.\n\n"
-    "Style: Hinglish (Hindi mixed with English), one or two short sentences per "
-    "turn — this is a phone call.\n\n"
-    "Flow: ask if their field reps still use spreadsheets or manage orders "
-    "manually. If yes, briefly explain Aspirantive automates sales and inventory. "
-    "Handle objections short. Offer a 15-minute discovery slot.\n\n"
-    "CRITICAL: Saying 'goodbye' does NOT end the call — you MUST call the "
-    "end_call function when wrapping up. Never leave the caller on hold."
+    "You are Arushi from Aspirantive, calling Indian pharma/distribution "
+    "businesses about CRM/ERP automation. Book a 15-minute discovery slot.\n\n"
+    "Hinglish (Hindi+English), MAXIMUM 2 sentences and 20 words per reply — phone call, be brief. "
+    "Ask if reps manage orders manually. Briefly pitch automation. Offer the slot."
 )
 
 
@@ -141,7 +139,7 @@ def _prerender_greeting() -> bytes | None:
         "model_id": TTS_MODEL,
         "transcript": FIRST_MESSAGE,
         "voice": {"mode": "id", "id": TTS_VOICE},
-        "language": STT_LANGUAGE,
+        "language": TTS_LANGUAGE,
         "output_format": {
             "container": "raw",
             "encoding": "pcm_s16le",
@@ -232,9 +230,9 @@ async def _stream_cached_greeting(pcm_bytes: bytes) -> AsyncGenerator[rtc.AudioF
 
 def prewarm(proc: agents.JobProcess):
     proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.4)
-    proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE)
-    proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=150)
-    proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, STT_LANGUAGE)
+    proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
+    proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40)
+    proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -256,9 +254,9 @@ async def entrypoint(ctx: agents.JobContext):
     ud = ctx.proc.userdata
     session = AgentSession(
         vad=ud.get("vad") or silero.VAD.load(min_silence_duration=0.4),
-        stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE),
-        llm=ud.get("llm") or lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=150),
-        tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, STT_LANGUAGE),
+        stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300),
+        llm=ud.get("llm") or lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40),
+        tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE),
         tools=create_tools(ctx),
         # Enable preemptive_generation only — leave endpointing at defaults
         # (min_delay=0.5, max_delay=3.0). Aggressive endpointing breaks
@@ -302,26 +300,26 @@ async def entrypoint(ctx: agents.JobContext):
     # finishes their first response. Knocks ~1-2s off the first LLM TTFT.
     asyncio.create_task(_warm_llm())
 
-    # Silence watchdog — backup when the LLM verbalises a farewell ("I'm
-    # ending the call now") but forgets to invoke the end_call function tool.
-    # If neither party has spoken for >25s we force-end the call.
+    # Silence watchdog — if neither party has spoken for >35s, force-end the call.
     last_activity = [time.monotonic()]
 
+    # Bump on EVERY state change — both speak-start and speak-end count as
+    # activity. Earlier version only bumped on speak-start, which meant a long
+    # agent response (e.g. 28s) would be counted as silence and the watchdog
+    # would fire the moment the agent stopped talking. Fixed 2026-06-02.
     @session.on("user_state_changed")
     def _track_user_activity(ev):
-        if ev.new_state == "speaking":
-            last_activity[0] = time.monotonic()
+        last_activity[0] = time.monotonic()
 
     @session.on("agent_state_changed")
     def _track_agent_activity(ev):
-        if ev.new_state == "speaking":
-            last_activity[0] = time.monotonic()
+        last_activity[0] = time.monotonic()
 
     async def _silence_watchdog():
         while True:
             await asyncio.sleep(5)
             idle = time.monotonic() - last_activity[0]
-            if idle > 25:
+            if idle > 35:
                 logger.warning(f"Both parties silent for {idle:.0f}s — auto-ending call")
                 try:
                     await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))

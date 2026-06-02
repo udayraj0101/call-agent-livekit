@@ -38,6 +38,7 @@ from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import deepgram, noise_cancellation, silero
 from livekit.plugins import openai as lk_openai
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from tts import build_tts
 from tools import create_tools
@@ -250,6 +251,7 @@ def prewarm(proc: agents.JobProcess):
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
     proc.userdata["llm"] = _build_azure_llm()
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
+    proc.userdata["turn_detector"] = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -289,14 +291,14 @@ async def entrypoint(ctx: agents.JobContext):
         llm=ud.get("llm") or _build_azure_llm(),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE),
         tools=create_tools(ctx),
-        # Stays at LiveKit default 0.5s. We tried 0.3s for a ~200ms turn win;
-        # it broke Hindi conversations because Hindi has natural mid-sentence
-        # pauses ("...क्या कर सकते <pause> हो?") that the shorter window
-        # mistook for end-of-turn — STT finalized partial transcripts and the
-        # agent restarted LLM mid-thought. Don't lower without a semantic turn
-        # detector (LiveKit ships one — `livekit-plugins-turn-detector`).
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
+            # MultilingualModel predicts semantic end-of-turn before Deepgram's
+            # 300ms silence expires — saves ~200-300ms vs pure silence endpointing.
+            # min_delay=0.1 is safe because the model guards against mid-sentence
+            # false triggers (the comment-out 0.3s attempt broke Hindi pauses).
+            "turn_detection": ud.get("turn_detector") or MultilingualModel(),
+            "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
         },
     )
     greeting_pcm: bytes | None = ud.get("greeting_pcm")

@@ -23,6 +23,7 @@ from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import deepgram, noise_cancellation, silero
 from livekit.plugins import openai as lk_openai
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from tts import build_tts
 from tools import create_tools
@@ -233,6 +234,7 @@ def prewarm(proc: agents.JobProcess):
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
     proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40)
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
+    proc.userdata["turn_detector"] = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -258,12 +260,10 @@ async def entrypoint(ctx: agents.JobContext):
         llm=ud.get("llm") or lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE),
         tools=create_tools(ctx),
-        # Enable preemptive_generation only — leave endpointing at defaults
-        # (min_delay=0.5, max_delay=3.0). Aggressive endpointing breaks
-        # Deepgram's transcript finalisation; just enabling preemptive lets the
-        # LLM start drafting on interim transcripts without touching that.
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
+            "turn_detection": ud.get("turn_detector") or MultilingualModel(),
+            "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
         },
     )
     greeting_pcm: bytes | None = ud.get("greeting_pcm")

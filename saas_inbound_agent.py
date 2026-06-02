@@ -56,6 +56,7 @@ from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import deepgram, noise_cancellation, silero
 from livekit.plugins import openai as lk_openai
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from tts import build_tts
 from tools import create_tools
@@ -125,7 +126,7 @@ class SampleAgent(Agent):
 
 
 # ---------------------------------------------------------------------------
-# Azure LLM factory — same construction as azure_agent.py
+# LLM factories
 # ---------------------------------------------------------------------------
 
 def _build_azure_llm():
@@ -137,6 +138,11 @@ def _build_azure_llm():
         temperature=LLM_TEMPERATURE,
         max_completion_tokens=40,
     )
+
+def _build_openai_llm():
+    # gpt-4o-mini direct — ~400-600ms TTFB even from India (vs 900-1400ms for
+    # Azure gpt-4o full). Use this until Azure gpt-4o-mini India quota is approved.
+    return lk_openai.LLM(model="gpt-4o-mini", temperature=LLM_TEMPERATURE, max_completion_tokens=40)
 
 
 # ---------------------------------------------------------------------------
@@ -229,18 +235,14 @@ def _prerender_greeting() -> bytes | None:
 
 async def _warm_llm() -> None:
     try:
-        client = openai.AsyncAzureOpenAI(
-            azure_endpoint=AZURE_OPENAI_ENDPOINT,
-            api_key=AZURE_OPENAI_API_KEY,
-            api_version=AZURE_OPENAI_API_VERSION,
-        )
+        client = openai.AsyncOpenAI()
         await client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT,
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=1,
             temperature=0,
         )
-        logger.info("Azure LLM connection warmed")
+        logger.info("OpenAI LLM connection warmed")
     except Exception as e:
         logger.warning(f"Azure LLM warmup failed (non-fatal): {e}")
 
@@ -267,8 +269,9 @@ async def _stream_cached_greeting(pcm_bytes: bytes) -> AsyncGenerator[rtc.AudioF
 def prewarm(proc: agents.JobProcess):
     proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.4)
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
-    proc.userdata["llm"] = _build_azure_llm()
+    proc.userdata["llm"] = _build_openai_llm()
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
+    proc.userdata["turn_detector"] = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -323,11 +326,17 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         vad=ud.get("vad") or silero.VAD.load(min_silence_duration=0.4),
         stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300),
-        llm=ud.get("llm") or _build_azure_llm(),
+        llm=ud.get("llm") or _build_openai_llm(),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE),
         tools=create_tools(ctx),
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
+            # MultilingualModel predicts end-of-turn semantically so the agent
+            # can commit before Deepgram's 300ms silence wait expires (~200-300ms
+            # saved). min_delay lowered from default 0.5s to 0.1s — the model
+            # acts as the semantic guard; Deepgram's 300ms is still the floor.
+            "turn_detection": ud.get("turn_detector") or MultilingualModel(),
+            "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
         },
     )
     greeting_pcm: bytes | None = ud.get("greeting_pcm")

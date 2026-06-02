@@ -234,7 +234,6 @@ def prewarm(proc: agents.JobProcess):
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
     proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40)
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
-    proc.userdata["turn_detector"] = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -262,7 +261,7 @@ async def entrypoint(ctx: agents.JobContext):
         tools=create_tools(ctx),
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
-            "turn_detection": ud.get("turn_detector") or MultilingualModel(),
+            "turn_detection": MultilingualModel(),
             "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
         },
     )

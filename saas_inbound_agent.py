@@ -271,7 +271,6 @@ def prewarm(proc: agents.JobProcess):
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
     proc.userdata["llm"] = _build_openai_llm()
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
-    proc.userdata["turn_detector"] = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -335,7 +334,7 @@ async def entrypoint(ctx: agents.JobContext):
             # can commit before Deepgram's 300ms silence wait expires (~200-300ms
             # saved). min_delay lowered from default 0.5s to 0.1s — the model
             # acts as the semantic guard; Deepgram's 300ms is still the floor.
-            "turn_detection": ud.get("turn_detector") or MultilingualModel(),
+            "turn_detection": MultilingualModel(),
             "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
         },
     )

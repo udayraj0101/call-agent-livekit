@@ -251,7 +251,6 @@ def prewarm(proc: agents.JobProcess):
     proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
     proc.userdata["llm"] = _build_azure_llm()
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
-    proc.userdata["turn_detector"] = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
@@ -297,7 +296,7 @@ async def entrypoint(ctx: agents.JobContext):
             # 300ms silence expires — saves ~200-300ms vs pure silence endpointing.
             # min_delay=0.1 is safe because the model guards against mid-sentence
             # false triggers (the comment-out 0.3s attempt broke Hindi pauses).
-            "turn_detection": ud.get("turn_detector") or MultilingualModel(),
+            "turn_detection": MultilingualModel(),
             "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
         },
     )

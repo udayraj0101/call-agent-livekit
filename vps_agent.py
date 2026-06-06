@@ -1,43 +1,21 @@
 """
-SaaS-LiveKit-compatible Azure India inbound agent.
+VPS-optimised inbound agent — deploy this on a Linux server (Mumbai region).
 
-Mirrors azure_agent.py features exactly (Azure gpt-4o India + Cartesia Arushi +
-Deepgram nova-3 Hindi + greeting prerender + LLM warmup + silence watchdog +
-trimmed prompt + max_tokens cap) but registers on the call-agent-saas LiveKit
-project using a SEPARATE set of credentials.
+Identical to agent.py in every way EXCEPT turn detection:
+- Uses MultilingualModel semantic endpointing instead of pure silence threshold
+- min_delay=0.1 (safe because the model guards false triggers)
+- endpointing_ms=300 (Deepgram; MultilingualModel fires before this anyway)
 
-Goal: validate that the same agent quality + latency hold when calls are routed
-through the SaaS project's existing SIP trunk and dispatch rule.
+On Linux the MultilingualModel runs in ~50ms (vs ~220ms on Windows), so it
+saves 150-350ms per turn compared to agent.py's silence-only approach.
 
-Supports both inbound and outbound (SaaS-style):
-- Inbound: SaaS SIP dispatch rule routes incoming call → this agent picks up
-- Outbound: dispatched with metadata {"phone_number": "+91...", "trunk_id": ...}
-  → this agent places the call via the SaaS trunk
-
-Intentionally OMITS the SaaS internal-API integrations (KB fetch, transcript
-POST, inbound config lookup) — we don't have access to those endpoints from
-this repo. The agent config is hardcoded Aspirantive (same as azure_agent.py);
-job metadata is logged but not used to override config.
-
-============================================================================
-Required env vars — add these to .env alongside the existing aspirantive ones:
-============================================================================
-
-    # SaaS LiveKit project credentials (DIFFERENT from LIVEKIT_URL/KEY/SECRET
-    # used by agent.py and azure_agent.py — those point at ai-integration)
-    LIVEKIT_SAAS_URL          = wss://<saas-project>.livekit.cloud
-    LIVEKIT_SAAS_API_KEY      = <key from SaaS LiveKit project>
-    LIVEKIT_SAAS_API_SECRET   = <secret from SaaS LiveKit project>
-
-    # agent_name to register as — MUST match the agent_name in the SaaS
-    # project's SIP Dispatch Rule. SaaS default is "outbound-caller".
-    SAAS_AGENT_NAME           = outbound-caller
-
-Cartesia, Deepgram, and Azure OpenAI keys are SHARED with the existing setup
-— reads CARTESIA_API_KEY, DEEPGRAM_API_KEY, AZURE_OPENAI_* from .env directly.
+Expected agent-side latency on Mumbai VPS: 500-650ms per turn
+(vs 750-1000ms on Windows with silence endpointing)
 
 Run with:
-    uv run python saas_inbound_agent.py start
+    uv run python vps_agent.py start
+
+Same .env as agent.py — no extra env vars needed.
 """
 
 import asyncio
@@ -56,60 +34,37 @@ from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import deepgram, noise_cancellation, silero
 from livekit.plugins import openai as lk_openai
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from tts import build_tts
 from tools import create_tools
 
 load_dotenv(".env")
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("saas-azure-agent")
+logger = logging.getLogger("vps-agent")
 
 
 # ---------------------------------------------------------------------------
-# Hardcoded Aspirantive config — mirrors azure_agent.py exactly
+# Config — identical to agent.py
 # ---------------------------------------------------------------------------
 
-# Must match the agent_name in the SaaS project's SIP Dispatch Rule.
-AGENT_NAME = os.getenv("SAAS_AGENT_NAME", "outbound-caller")
-
-# SaaS LiveKit project credentials — read from separate env vars so this file
-# can run alongside agent.py/azure_agent.py (which use the aspirantive
-# LIVEKIT_URL/KEY/SECRET) without env conflicts.
-SAAS_LIVEKIT_URL        = os.getenv("LIVEKIT_SAAS_URL")
-SAAS_LIVEKIT_API_KEY    = os.getenv("LIVEKIT_SAAS_API_KEY")
-SAAS_LIVEKIT_API_SECRET = os.getenv("LIVEKIT_SAAS_API_SECRET")
+AGENT_NAME                = "inbound-caller"
 
 LLM_TEMPERATURE           = 0.3
+GROQ_API_KEY              = os.getenv("GROQ_API_KEY")
+GROQ_MODEL                = "llama-3.3-70b-versatile"
 STT_MODEL                 = "nova-3"
-# "multi" handles code-switched Hindi+English (Hinglish) better than "hi" —
-# observed 2026-06-02 that nova-3 + "hi" often misses finals on short
-# utterances (<2s) and mistranscribes short Hindi like "कल सुबह 10 बजे"
-# as "Hello?". multi is Deepgram's code-switching model and is more robust.
 STT_LANGUAGE              = "multi"
-# Cartesia / build_tts() need a real language code, not "multi" — keep Hindi
-# explicitly for the greeting prerender and TTS pipeline.
 TTS_LANGUAGE              = "hi"
 MAX_CALL_DURATION_SECONDS = 600
 
-# Azure OpenAI config — same as azure_agent.py
-AZURE_OPENAI_ENDPOINT     = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_KEY      = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_DEPLOYMENT   = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-AZURE_OPENAI_API_VERSION  = os.getenv("OPENAI_API_VERSION", "2024-12-01-preview")
-
-# Groq config
-GROQ_API_KEY              = os.getenv("GROQ_API_KEY")
-GROQ_MODEL                = "llama-3.3-70b-versatile"
-
-# Cartesia TTS — same Arushi voice
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "cartesia").lower()
 if TTS_PROVIDER == "openai":
     TTS_MODEL = "tts-1"
     TTS_VOICE = "nova"
 else:
-    TTS_PROVIDER = "cartesia"
-    TTS_MODEL    = "sonic-3.5"
-    TTS_VOICE    = "95d51f79-c397-46f9-b49a-23763d3eaa2d"  # Arushi — Hinglish Speaker
+    TTS_MODEL = "sonic-3.5"
+    TTS_VOICE = "95d51f79-c397-46f9-b49a-23763d3eaa2d"  # Arushi — Hinglish Speaker
 
 FIRST_MESSAGE = (
     "नमस्ते, मैं आरुषि बोल रही हूँ Aspirantive से। "
@@ -133,30 +88,6 @@ SYSTEM_PROMPT = (
 class SampleAgent(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=SYSTEM_PROMPT)
-
-
-# ---------------------------------------------------------------------------
-# LLM factories
-# ---------------------------------------------------------------------------
-
-def _build_azure_llm():
-    return lk_openai.LLM.with_azure(
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        api_key=AZURE_OPENAI_API_KEY,
-        azure_deployment=AZURE_OPENAI_DEPLOYMENT,
-        api_version=AZURE_OPENAI_API_VERSION,
-        temperature=LLM_TEMPERATURE,
-        max_completion_tokens=40,
-    )
-
-def _build_openai_llm():
-    return lk_openai.LLM(
-        model=GROQ_MODEL,
-        base_url="https://api.groq.com/openai/v1",
-        api_key=GROQ_API_KEY,
-        temperature=LLM_TEMPERATURE,
-        max_completion_tokens=120,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +126,7 @@ async def _enforce_max_duration(session: AgentSession, ctx: agents.JobContext, m
 
 
 # ---------------------------------------------------------------------------
-# Greeting prerender — same as azure_agent.py
+# Greeting prerender
 # ---------------------------------------------------------------------------
 
 def _prerender_greeting() -> bytes | None:
@@ -282,84 +213,64 @@ async def _stream_cached_greeting(pcm_bytes: bytes) -> AsyncGenerator[rtc.AudioF
 
 
 # ---------------------------------------------------------------------------
-# Prewarm
+# Prewarm — MultilingualModel is instantiated here so it loads once per
+# worker process, not once per call.
 # ---------------------------------------------------------------------------
 
 def prewarm(proc: agents.JobProcess):
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.4)
-    proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=200, keyterm=["Aspirantive", "Arushi"])
-    proc.userdata["llm"] = _build_openai_llm()
-    proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
+    proc.userdata["vad"]          = silero.VAD.load(min_silence_duration=0.4)
+    proc.userdata["stt"]          = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300, keyterm=["Aspirantive", "Arushi"])
+    proc.userdata["llm"]          = lk_openai.LLM(
+        model=GROQ_MODEL,
+        base_url="https://api.groq.com/openai/v1",
+        api_key=GROQ_API_KEY,
+        temperature=LLM_TEMPERATURE,
+        max_completion_tokens=120,
+    )
+    proc.userdata["tts"]          = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
+    proc.userdata["turn_model"]   = MultilingualModel()
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint — handles both inbound and outbound (SaaS-style metadata)
+# Entrypoint
 # ---------------------------------------------------------------------------
 
 async def entrypoint(ctx: agents.JobContext):
-    missing = [
-        name for name, value in [
-            ("AZURE_OPENAI_ENDPOINT", AZURE_OPENAI_ENDPOINT),
-            ("AZURE_OPENAI_API_KEY", AZURE_OPENAI_API_KEY),
-            ("AZURE_OPENAI_DEPLOYMENT", AZURE_OPENAI_DEPLOYMENT),
-        ] if not value
-    ]
-    if missing:
-        logger.error(f"Missing required Azure env vars: {missing} — aborting call")
-        ctx.shutdown()
-        return
-
     t0 = time.monotonic()
     def ts(label: str) -> None:
         logger.info(f"[+{(time.monotonic()-t0)*1000:.0f}ms] {label}")
 
-    # Parse SaaS-style job metadata. We log it but don't use it to override the
-    # hardcoded Aspirantive config — this agent is a fixed-config testbed for
-    # validating azure_agent.py features through SaaS infrastructure.
-    metadata: dict = {}
-    try:
-        if ctx.job.metadata:
-            metadata = json.loads(ctx.job.metadata)
-    except Exception:
-        logger.warning("Could not parse job metadata — proceeding with hardcoded config.")
-
-    phone_number: str | None = metadata.get("phone_number")
-    trunk_id:     str | None = metadata.get("trunk_id") or os.getenv("OUTBOUND_TRUNK_ID")
-    direction = "outbound" if phone_number else "inbound"
-
+    logger.info(f"Inbound call (VPS) — connecting to room: {ctx.room.name}")
     logger.info(
-        f"{direction.title()} call (SaaS-LiveKit + Groq {GROQ_MODEL}) — "
-        f"room: {ctx.room.name}"
+        f"Config — llm=groq/{GROQ_MODEL} tts={TTS_PROVIDER}/{TTS_MODEL}/{TTS_VOICE} "
+        f"stt={STT_MODEL}/{STT_LANGUAGE} turn_detection=MultilingualModel"
     )
-    logger.info(
-        f"Config — llm=groq/{GROQ_MODEL} "
-        f"tts={TTS_PROVIDER}/{TTS_MODEL}/{TTS_VOICE} stt={STT_MODEL}/{STT_LANGUAGE} "
-        f"direction={direction}"
-    )
-    if metadata:
-        logger.info(f"Metadata (logged, not applied): {metadata}")
 
     ud = ctx.proc.userdata
     session = AgentSession(
         vad=ud.get("vad") or silero.VAD.load(min_silence_duration=0.4),
-        stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=200, keyterm=["Aspirantive", "Arushi"]),
-        llm=ud.get("llm") or _build_openai_llm(),
+        stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300, keyterm=["Aspirantive", "Arushi"]),
+        llm=ud.get("llm") or lk_openai.LLM(
+            model=GROQ_MODEL,
+            base_url="https://api.groq.com/openai/v1",
+            api_key=GROQ_API_KEY,
+            temperature=LLM_TEMPERATURE,
+            max_completion_tokens=120,
+        ),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE),
         tools=create_tools(ctx),
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
-            "endpointing": {"min_delay": 0.5, "max_delay": 2.0},
+            "turn_detection": ud.get("turn_model") or MultilingualModel(),
+            "endpointing": {"min_delay": 0.1, "max_delay": 4.0},
         },
     )
     greeting_pcm: bytes | None = ud.get("greeting_pcm")
 
     # STT gap detector — fires when Deepgram drops a user utterance entirely.
-    # Uses agent→thinking transitions (not STT finals) to detect handled turns,
-    # because STT finals often arrive 50-100ms before user_state→listening,
-    # which would make _last_stt_final < _last_speech_end even for normal turns.
-    _last_speech_end     = [0.0]   # when user last stopped speaking
-    _last_agent_thinking = [0.0]   # when agent last entered thinking state
+    _last_speech_end     = [0.0]
+    _last_agent_thinking = [0.0]
     _agent_listening     = [True]
 
     @session.on("user_state_changed")
@@ -375,7 +286,7 @@ async def entrypoint(ctx: agents.JobContext):
         if ev.new_state == "thinking":
             _last_agent_thinking[0] = time.monotonic()
         elif ev.new_state == "speaking":
-            _last_speech_end[0] = 0.0  # agent is responding — clear pending speech marker
+            _last_speech_end[0] = 0.0
 
     @session.on("user_input_transcribed")
     def _on_transcribed(ev):
@@ -384,14 +295,12 @@ async def entrypoint(ctx: agents.JobContext):
         ts(f"stt ({tag}): {text!r}")
 
     async def _stt_gap_watchdog():
-        """Detect when Deepgram drops a user utterance entirely and prompt repeat."""
         while True:
             await asyncio.sleep(2)
             speech_end = _last_speech_end[0]
             if speech_end <= 0:
                 continue
             gap = time.monotonic() - speech_end
-            # Agent never entered thinking after user stopped (= STT produced nothing)
             if gap > 2.5 and _last_agent_thinking[0] < speech_end and _agent_listening[0]:
                 logger.warning(f"STT gap: {gap:.1f}s after user stopped, no agent response — prompting repeat")
                 _last_speech_end[0] = 0.0
@@ -417,10 +326,6 @@ async def entrypoint(ctx: agents.JobContext):
 
     last_activity = [time.monotonic()]
 
-    # Bump on EVERY state change — both speak-start and speak-end count as
-    # activity. Earlier version only bumped on speak-start, which meant a long
-    # agent response (e.g. 28s) would be counted as silence and the watchdog
-    # would fire the moment the agent stopped talking. Fixed 2026-06-02.
     @session.on("user_state_changed")
     def _track_user_activity(ev):
         last_activity[0] = time.monotonic()
@@ -443,50 +348,20 @@ async def entrypoint(ctx: agents.JobContext):
 
     asyncio.create_task(_silence_watchdog())
 
-    # ── Outbound branch — place a SIP call via the SaaS trunk ──────────────
-    if direction == "outbound":
-        if not trunk_id:
-            logger.error("Outbound call but no trunk_id in metadata or env — aborting.")
-            ctx.shutdown()
-            return
-        logger.info(f"Placing outbound call → {phone_number} via trunk {trunk_id}")
+    try:
+        participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=10.0)
+        ts(f"participant joined: {participant.identity}")
+    except asyncio.TimeoutError:
+        logger.error("No SIP participant joined within 10s — aborting call.")
         try:
-            await ctx.api.sip.create_sip_participant(
-                api.CreateSIPParticipantRequest(
-                    room_name=ctx.room.name,
-                    sip_trunk_id=trunk_id,
-                    sip_call_to=phone_number,
-                    participant_identity=f"sip_{phone_number}",
-                    wait_until_answered=True,
-                )
-            )
-            ts(f"outbound call answered: {phone_number}")
-        except Exception as e:
-            logger.error(f"Outbound call failed: {e}")
-            try:
-                await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
-            except Exception:
-                pass
-            ctx.shutdown()
-            return
+            await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
+        except Exception:
+            pass
+        ctx.shutdown()
+        return
+    except Exception as e:
+        logger.warning(f"wait_for_participant failed, greeting anyway: {e}")
 
-    # ── Inbound branch — wait for SIP caller to subscribe ──────────────────
-    else:
-        try:
-            participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=10.0)
-            ts(f"participant joined: {participant.identity}")
-        except asyncio.TimeoutError:
-            logger.error("No SIP participant joined within 10s — aborting call.")
-            try:
-                await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
-            except Exception:
-                pass
-            ctx.shutdown()
-            return
-        except Exception as e:
-            logger.warning(f"wait_for_participant failed, greeting anyway: {e}")
-
-    # ── Speak greeting (cached PCM bypasses TTS for instant first-word) ────
     try:
         if greeting_pcm:
             ts(f"session.say begin (cached, {len(greeting_pcm)} bytes)")
@@ -512,30 +387,11 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
-    # Fail fast if the SaaS LiveKit creds are missing — without them the worker
-    # would silently fall back to the aspirantive LiveKit project and register
-    # there, which would collide with the agent.py/azure_agent.py worker.
-    missing = [
-        name for name, value in [
-            ("LIVEKIT_SAAS_URL", SAAS_LIVEKIT_URL),
-            ("LIVEKIT_SAAS_API_KEY", SAAS_LIVEKIT_API_KEY),
-            ("LIVEKIT_SAAS_API_SECRET", SAAS_LIVEKIT_API_SECRET),
-        ] if not value
-    ]
-    if missing:
-        raise SystemExit(
-            f"Missing required SaaS LiveKit env vars: {missing}. "
-            f"Add them to .env — see the file header for the full list."
-        )
-
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name=AGENT_NAME,
-            ws_url=SAAS_LIVEKIT_URL,
-            api_key=SAAS_LIVEKIT_API_KEY,
-            api_secret=SAAS_LIVEKIT_API_SECRET,
-            port=int(os.getenv("AGENT_HTTP_PORT", "8083")),
+            port=int(os.getenv("AGENT_HTTP_PORT", "8081")),
         )
     )

@@ -23,8 +23,6 @@ from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import deepgram, noise_cancellation, silero
 from livekit.plugins import openai as lk_openai
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
-
 from tts import build_tts
 from tools import create_tools
 
@@ -41,8 +39,9 @@ logger = logging.getLogger("call-agent")
 # IMPORTANT: must match the agent_name in your LiveKit inbound SIP dispatch rule.
 AGENT_NAME                = "inbound-caller"
 
-LLM_MODEL                 = "gpt-4o-mini"
-LLM_TEMPERATURE           = 0.7
+LLM_TEMPERATURE           = 0.3
+GROQ_API_KEY              = os.getenv("GROQ_API_KEY")
+GROQ_MODEL                = "llama-3.3-70b-versatile"
 STT_MODEL                 = "nova-3"          # upgraded from nova-2 — better Hinglish accuracy
 STT_LANGUAGE              = "multi"            # Deepgram code-switching model
                                                # (better than "hi" for Hinglish)
@@ -77,10 +76,14 @@ _GREETING_SAMPLE_RATE = 24000
 # (~500ms saved per turn — measured on azure_agent.py 2026-06-01 test). Every
 # word here ships on every request.
 SYSTEM_PROMPT = (
-    "You are Arushi from Aspirantive, calling Indian pharma/distribution "
-    "businesses about CRM/ERP automation. Book a 15-minute discovery slot.\n\n"
-    "Hinglish (Hindi+English), MAXIMUM 2 sentences and 20 words per reply — phone call, be brief. "
-    "Ask if reps manage orders manually. Briefly pitch automation. Offer the slot."
+    "You are Arushi from Aspirantive, a friendly sales rep calling pharma/distribution businesses in India. "
+    "Speak in natural Hinglish (Hindi + English mix) — warm, conversational, phone-call style.\n"
+    "Goal: book a 15-minute discovery call about CRM/ERP automation.\n"
+    "Reply in 2-3 sentences max. Explain clearly but stay concise — this is a phone call, not a presentation. "
+    "Guide conversation: understand their order process → explain how automation saves time and reduces errors → offer a 15-min call to show it live.\n"
+    "If they ask about Aspirantive: explain in 1-2 lines — 'Hum pharma aur distribution businesses ke liye CRM automation provide karte hain. "
+    "Aapke orders, inventory, aur billing sab ek jagah automatic ho jaata hai.' Then steer to booking.\n"
+    "If you don't understand what they said: 'Sorry, mujhe clearly nahi suna — kya aap phir se bol sakte hain?'"
 )
 
 
@@ -194,16 +197,19 @@ async def _warm_llm() -> None:
     affect the actual call.
     """
     try:
-        client = openai.AsyncOpenAI()
+        client = openai.AsyncOpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=GROQ_API_KEY,
+        )
         await client.chat.completions.create(
-            model=LLM_MODEL,
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=1,
             temperature=0,
         )
-        logger.info("LLM connection warmed")
+        logger.info("Groq LLM connection warmed")
     except Exception as e:
-        logger.warning(f"LLM warmup failed (non-fatal): {e}")
+        logger.warning(f"Groq LLM warmup failed (non-fatal): {e}")
 
 
 async def _stream_cached_greeting(pcm_bytes: bytes) -> AsyncGenerator[rtc.AudioFrame, None]:
@@ -231,8 +237,14 @@ async def _stream_cached_greeting(pcm_bytes: bytes) -> AsyncGenerator[rtc.AudioF
 
 def prewarm(proc: agents.JobProcess):
     proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.4)
-    proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300)
-    proc.userdata["llm"] = lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40)
+    proc.userdata["stt"] = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=200, keyterm=["Aspirantive", "Arushi"])
+    proc.userdata["llm"] = lk_openai.LLM(
+        model=GROQ_MODEL,
+        base_url="https://api.groq.com/openai/v1",
+        api_key=GROQ_API_KEY,
+        temperature=LLM_TEMPERATURE,
+        max_completion_tokens=120,
+    )
     proc.userdata["tts"] = build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE)
     proc.userdata["greeting_pcm"] = _prerender_greeting()
 
@@ -248,39 +260,70 @@ async def entrypoint(ctx: agents.JobContext):
 
     logger.info(f"Inbound call — connecting to room: {ctx.room.name}")
     logger.info(
-        f"Config — llm={LLM_MODEL} tts={TTS_PROVIDER}/{TTS_MODEL}/{TTS_VOICE} "
+        f"Config — llm=groq/{GROQ_MODEL} tts={TTS_PROVIDER}/{TTS_MODEL}/{TTS_VOICE} "
         f"stt={STT_MODEL}/{STT_LANGUAGE}"
     )
 
     ud = ctx.proc.userdata
     session = AgentSession(
         vad=ud.get("vad") or silero.VAD.load(min_silence_duration=0.4),
-        stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=300),
-        llm=ud.get("llm") or lk_openai.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE, max_completion_tokens=40),
+        stt=ud.get("stt") or deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE, endpointing_ms=200, keyterm=["Aspirantive", "Arushi"]),
+        llm=ud.get("llm") or lk_openai.LLM(
+            model=GROQ_MODEL,
+            base_url="https://api.groq.com/openai/v1",
+            api_key=GROQ_API_KEY,
+            temperature=LLM_TEMPERATURE,
+            max_completion_tokens=120,
+        ),
         tts=ud.get("tts") or build_tts(TTS_PROVIDER, TTS_MODEL, TTS_VOICE, TTS_LANGUAGE),
         tools=create_tools(ctx),
         turn_handling={
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
-            "turn_detection": MultilingualModel(),
-            "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
+            "endpointing": {"min_delay": 0.5, "max_delay": 2.0},
         },
     )
     greeting_pcm: bytes | None = ud.get("greeting_pcm")
 
-    # Per-turn diagnostic logging — shows where each turn's latency goes.
+    # STT gap detector — fires when Deepgram drops a user utterance entirely.
+    _last_speech_end     = [0.0]
+    _last_agent_thinking = [0.0]
+    _agent_listening     = [True]
+
     @session.on("user_state_changed")
     def _on_user_state(ev):
         ts(f"user_state: {ev.old_state} → {ev.new_state}")
+        if ev.old_state == "speaking" and ev.new_state == "listening":
+            _last_speech_end[0] = time.monotonic()
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev):
         ts(f"agent_state: {ev.old_state} → {ev.new_state}")
+        _agent_listening[0] = (ev.new_state == "listening")
+        if ev.new_state == "thinking":
+            _last_agent_thinking[0] = time.monotonic()
+        elif ev.new_state == "speaking":
+            _last_speech_end[0] = 0.0
 
     @session.on("user_input_transcribed")
     def _on_transcribed(ev):
         tag = "final" if getattr(ev, "is_final", False) else "interim"
         text = getattr(ev, "transcript", "") or ""
         ts(f"stt ({tag}): {text!r}")
+
+    async def _stt_gap_watchdog():
+        while True:
+            await asyncio.sleep(2)
+            speech_end = _last_speech_end[0]
+            if speech_end <= 0:
+                continue
+            gap = time.monotonic() - speech_end
+            if gap > 2.5 and _last_agent_thinking[0] < speech_end and _agent_listening[0]:
+                logger.warning(f"STT gap: {gap:.1f}s after user stopped, no agent response — prompting repeat")
+                _last_speech_end[0] = 0.0
+                try:
+                    await session.say("Sorry, mujhe clearly nahi suna — kya aap phir se bol sakte hain?")
+                except Exception:
+                    pass
 
     ts("session.start begin")
     await session.start(
@@ -294,10 +337,8 @@ async def entrypoint(ctx: agents.JobContext):
     ts("session.start done")
 
     asyncio.create_task(_enforce_max_duration(session, ctx, MAX_CALL_DURATION_SECONDS))
-    # Fire-and-forget LLM warmup — runs in parallel with the greeting playback
-    # so the OpenAI HTTPS+TLS connection pool is warm by the time the caller
-    # finishes their first response. Knocks ~1-2s off the first LLM TTFT.
     asyncio.create_task(_warm_llm())
+    asyncio.create_task(_stt_gap_watchdog())
 
     # Silence watchdog — if neither party has spoken for >35s, force-end the call.
     last_activity = [time.monotonic()]

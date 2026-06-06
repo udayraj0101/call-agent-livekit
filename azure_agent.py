@@ -88,10 +88,11 @@ _GREETING_SAMPLE_RATE = 24000
 # Trimmed from ~250 tokens to ~100 tokens to cut LLM prefix-processing time
 # (~150-300ms saved per turn). Every word here ships on every request.
 SYSTEM_PROMPT = (
-    "You are Arushi from Aspirantive, calling Indian pharma/distribution "
-    "businesses about CRM/ERP automation. Book a 15-minute discovery slot.\n\n"
-    "Hinglish (Hindi+English), MAXIMUM 2 sentences and 20 words per reply — phone call, be brief. "
-    "Ask if reps manage orders manually. Briefly pitch automation. Offer the slot."
+    "You are Arushi from Aspirantive, calling pharma/distribution businesses in India about CRM/ERP automation. "
+    "Goal: book a 15-minute discovery call.\n\n"
+    "Reply in natural Hinglish (Hindi + English). "
+    "MAX 2 short sentences per reply — this is a phone call, be brief. "
+    "Guide the conversation: understand how they currently manage orders, explain how automation helps, then offer to schedule a quick call."
 )
 
 
@@ -114,7 +115,7 @@ def _build_azure_llm():
         azure_deployment=AZURE_OPENAI_DEPLOYMENT,
         api_version=AZURE_OPENAI_API_VERSION,
         temperature=LLM_TEMPERATURE,
-        max_completion_tokens=40,
+        max_completion_tokens=60,
     )
 
 
@@ -297,7 +298,7 @@ async def entrypoint(ctx: agents.JobContext):
             # min_delay=0.1 is safe because the model guards against mid-sentence
             # false triggers (the comment-out 0.3s attempt broke Hindi pauses).
             "turn_detection": MultilingualModel(),
-            "endpointing": {"min_delay": 0.1, "max_delay": 2.0},
+            "endpointing": {"min_delay": 0.1, "max_delay": 4.0},
         },
     )
     greeting_pcm: bytes | None = ud.get("greeting_pcm")

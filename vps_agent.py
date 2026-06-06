@@ -38,7 +38,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from tts import build_tts
 from tools import create_tools
 
-load_dotenv(".env")
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vps-agent")

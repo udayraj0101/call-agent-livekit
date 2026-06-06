@@ -40,7 +40,6 @@ from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import deepgram, noise_cancellation, silero
 from livekit.plugins import openai as lk_openai
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from tts import build_tts
 from tools import create_tools
 
@@ -242,6 +241,7 @@ def prewarm(proc: agents.JobProcess):
 # ---------------------------------------------------------------------------
 
 async def entrypoint(ctx: agents.JobContext):
+    from livekit.plugins.turn_detector.multilingual import MultilingualModel
     t0 = time.monotonic()
     def ts(label: str) -> None:
         logger.info(f"[+{(time.monotonic()-t0)*1000:.0f}ms] {label}")

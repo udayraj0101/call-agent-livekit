@@ -18,10 +18,16 @@ Run with:
 Same .env as agent.py — no extra env vars needed.
 """
 
+import os
+
+# livekit.plugins.openai is preloaded in the inference subprocess (for MultilingualModel)
+# before any user code runs. Set a placeholder so the plugin's env validation passes.
+# The actual LLM uses Groq's endpoint with GROQ_API_KEY — this value is never sent to OpenAI.
+os.environ.setdefault("OPENAI_API_KEY", "not-used-groq-only")
+
 import asyncio
 import json
 import logging
-import os
 import random
 import time
 import urllib.error

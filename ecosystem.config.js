@@ -16,7 +16,7 @@ module.exports = {
       name: "call-agent",
       cwd: __dirname,
       script: "./.venv/bin/python",
-      args: "agent.py start",
+      args: "vps_agent.py start",
       interpreter: "none",
       instances: 1,
       autorestart: true,

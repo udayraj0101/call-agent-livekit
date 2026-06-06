@@ -27,6 +27,9 @@ module.exports = {
         // Override default 8081 — taken by the call-agent-saas worker on this VPS.
         // agent.py reads this and passes it to WorkerOptions(port=...).
         AGENT_HTTP_PORT: "8082",
+        // livekit.plugins.openai validates this key in inference subprocesses before
+        // user code (dotenv) runs on Linux. We use Groq, so any non-empty value works.
+        OPENAI_API_KEY: "not-used-groq-only",
       },
       error_file: "./logs/error.log",
       out_file: "./logs/out.log",
